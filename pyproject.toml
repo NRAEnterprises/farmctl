@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "farmctl"
+version = "1.0.0"
+description = "Private/domain-specific compute-farm device scanning and archiving. REQUIRES autopath and cloud-restore as prerequisites — it consumes and configures them, it does not shape how they work."
+requires-python = ">=3.9"
+# autopath and cloud-restore are hard, required prerequisites for this
+# package to function at all — device_inventory.py cannot organize its
+# archive tree or back it up without them. They are intentionally NOT
+# declared here as pip git+https dependencies, because that would
+# require `git` on the target machine (not guaranteed on a fresh
+# Termux install) and would redundantly re-fetch them during pip's
+# resolution even though install.sh already installs both, in order,
+# as explicit prerequisite steps before farmctl itself. If you publish
+# all three packages to PyPI later, replace this with the normal:
+#   dependencies = ["autopath>=1.0.0", "cloud-restore>=1.0.0"]
+dependencies = []
+
+[project.scripts]
+farmctl = "farmctl.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
