@@ -24,3 +24,7 @@ farmctl = "farmctl.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[project.urls]
+"Homepage" = "https://github.com/NRAEnterprises/farmctl-package"
+"Repository" = "https://github.com/NRAEnterprises/farmctl-package"
