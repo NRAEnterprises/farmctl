@@ -10,9 +10,9 @@
 
 set -eu
 
-REPO_URL="${FARMCTL_REPO_URL:-https://github.com/CHANGE_ME/farmctl/archive/refs/heads/main.tar.gz}"
-AUTOPATH_INSTALL_URL="${AUTOPATH_INSTALL_URL:-https://raw.githubusercontent.com/CHANGE_ME/autopath/main/install.sh}"
-CLOUD_RESTORE_INSTALL_URL="${CLOUD_RESTORE_INSTALL_URL:-https://raw.githubusercontent.com/CHANGE_ME/cloud_restore/main/install.sh}"
+REPO_URL="${FARMCTL_REPO_URL:-https://github.com/NRAEnterprises/farmctl-package/archive/refs/heads/main.tar.gz}"
+AUTOPATH_INSTALL_URL="${AUTOPATH_INSTALL_URL:-https://raw.githubusercontent.com/NRAEnterprises/autopath-package/main/install.sh}"
+CLOUD_RESTORE_INSTALL_URL="${CLOUD_RESTORE_INSTALL_URL:-https://raw.githubusercontent.com/NRAEnterprises/cloud-restore-package/main/install.sh}"
 
 have_cmd() {
     command -v "$1" >/dev/null 2>&1
