@@ -7,7 +7,7 @@ step between "device integrated" and "device backed up."
 
 Typical flow:
     farmctl configure                     # once
-    farmctl scan node-pixel7.local --type ssh
+    farmctl scan node-1.local --type ssh
     farmctl scan emulator-5554 --type adb
     farmctl backup                        # syncs the whole local archive
     ...later, after a rebuild...
@@ -18,6 +18,8 @@ Typical flow:
 import sys
 import argparse
 
+from pathlib import Path
+
 from .config import load_config, save_config, build_backend_from_config
 from . import device_inventory as di
 from cloud_restore import (
@@ -25,6 +27,41 @@ from cloud_restore import (
     backup_project_compressed, restore_project_compressed, restore_project_auto,
 )
 from cloud_restore.compression import detect_available_compressors, recommend_best_available
+
+# autopath's own registry (registered aliases, migrations log) is
+# per-user local state living at a fixed path autopath itself owns —
+# see ~/.config/autopath/paths.json. Backing it up is just "sync this
+# directory like any other," via cloud_restore's already-generic
+# functions — this does NOT create a code dependency between autopath
+# and cloud_restore; the composition lives entirely here, in farmctl,
+# which is the layer explicitly allowed to know about both. Neither
+# core package needs to change or know this happens.
+AUTOPATH_CONFIG_DIR = Path.home() / ".config" / "autopath"
+AUTOPATH_REGISTRY_PROJECT = "autopath-registry"
+
+
+def _sync_autopath_registry(backend, direction: str, dry_run: bool = False) -> None:
+    """
+    Best-effort secondary sync of autopath's local registry, run
+    alongside the main device-archive backup/restore. Failures here are
+    reported but never turn a successful device-archive operation into
+    a failed command — the registry is a convenience layer (skip
+    re-registering aliases after a rebuild), not the primary data this
+    tool exists to protect.
+    """
+    if direction == "backup":
+        if not AUTOPATH_CONFIG_DIR.exists():
+            return  # nothing registered yet on this machine -- fine, nothing to back up
+        result = backup_project(backend, AUTOPATH_REGISTRY_PROJECT, AUTOPATH_CONFIG_DIR, dry_run=dry_run)
+    else:
+        result = restore_project_auto(backend, AUTOPATH_REGISTRY_PROJECT, AUTOPATH_CONFIG_DIR, dry_run=dry_run)
+
+    label = "backup" if direction == "backup" else "restore"
+    if result.success:
+        print(f"(autopath registry {label}: OK)")
+    else:
+        print(f"(autopath registry {label} skipped/failed — device archive {label} is unaffected: {result.stderr})",
+              file=sys.stderr)
 
 
 def cmd_configure(args) -> int:
@@ -125,6 +162,10 @@ def cmd_backup(args) -> int:
         result = backup_project(backend, project, local_path, mirror=args.mirror, dry_run=args.dry_run)
 
     print_sync_result(result)
+
+    if not args.no_autopath_registry:
+        _sync_autopath_registry(backend, "backup", dry_run=args.dry_run)
+
     return 0 if result.success else 1
 
 
@@ -151,6 +192,10 @@ def cmd_restore(args) -> int:
         result = restore_project_auto(backend, project, local_path, dry_run=args.dry_run)
 
     print_sync_result(result)
+
+    if not args.no_autopath_registry:
+        _sync_autopath_registry(backend, "restore", dry_run=args.dry_run)
+
     return 0 if result.success else 1
 
 
@@ -209,6 +254,8 @@ def main(argv: list[str] | None = None) -> int:
                            help="Skip compression even if configured as the default.")
     p_backup.add_argument("--algorithm", default=None, help="Compression algorithm (overrides configured default; blank = auto-pick strongest installed).")
     p_backup.add_argument("--level", type=int, default=None, help="Compression level (overrides configured default).")
+    p_backup.add_argument("--no-autopath-registry", action="store_true",
+                           help="Skip the secondary backup of autopath's registered-path config.")
     p_backup.set_defaults(func=cmd_backup)
 
     p_restore = sub.add_parser("restore", help="Pull the device archive down from the configured remote (auto-detects compression from the remote's own manifest).")
@@ -216,6 +263,8 @@ def main(argv: list[str] | None = None) -> int:
     p_restore.add_argument("--dry-run", action="store_true")
     p_restore.add_argument("--fail-loud", action="store_true", default=True,
                             help="Raise immediately on restore failure (default: on).")
+    p_restore.add_argument("--no-autopath-registry", action="store_true",
+                            help="Skip the secondary restore of autopath's registered-path config.")
     p_restore.set_defaults(func=cmd_restore)
 
     sub.add_parser("rebuild", help="Reconnect known devices and regenerate SSH/K8s artifacts from the local archive.").set_defaults(func=cmd_rebuild)

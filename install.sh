@@ -6,7 +6,7 @@
 # prerequisites first (autopath, cloud_restore), then farmctl itself.
 #
 # Usage:
-#   curl -LsSf https://raw.githubusercontent.com/<YOUR_GH_USER>/farmctl/main/install.sh | sh
+#   curl -LsSf https://raw.githubusercontent.com/NRAEnterprises/farmctl-package/main/install.sh | sh
 
 set -eu
 

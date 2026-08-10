@@ -170,29 +170,240 @@ def probe_linux(exe: RemoteExecutor, profile: DeviceProfile) -> None:
         ) or ""
 
 
+# =======================================================================
+# Root manager detection — Magisk / KernelSU / APatch
+# =======================================================================
+#
+# All checks here use standard Android property keys and standard
+# install paths used by each root manager — none of this is specific to
+# any phone manufacturer or model. It runs the same probe sequence
+# against any Android device (Pixel, Galaxy, OnePlus, an Android SBC,
+# etc.) with no per-model branching anywhere.
+#
+# This is the fuller version of root detection (multiple binary
+# locations per manager, KernelSU's /proc/version signature, a real
+# multi-path su search instead of relying on PATH alone) — brought in
+# from an earlier draft that existed elsewhere in this project but had
+# not actually been merged into the live fingerprinting path until now.
+
+MAGISK_BINARY_PATHS = ["/data/adb/magisk/magisk", "/sbin/magisk", "/system/bin/magisk"]
+KERNELSU_BINARY_PATHS = ["/data/adb/ksu/bin/ksud", "/data/adb/ksud", "/system/bin/ksud"]
+APATCH_BINARY_PATHS = ["/data/adb/ap/bin/apd", "/data/adb/apd", "/system/bin/apd"]
+
+# Generic su search locations, beyond just whatever `which su` finds on
+# PATH — some root manager configurations don't put su on PATH at all.
+SU_SEARCH_PATHS = [
+    "/system/bin/su", "/system/xbin/su", "/sbin/su",
+    "/system/sd/xbin/su", "/system/bin/failsafe/su",
+    "/data/local/xbin/su", "/data/local/bin/su", "/data/local/su",
+    "/su/bin/su", "/magisk/.core/bin/su", "/debug_ramdisk/su",
+]
+
+# Module directories used by Magisk, KernelSU, and APatch — all three
+# use the same "one directory per module, containing module.prop"
+# layout, so a single search across all of these covers all three
+# managers without needing to know which one is active first.
+MODULE_SEARCH_ROOTS = [
+    "/data/adb/modules", "/data/adb/modules_update",
+]
+
+
+def _first_existing_remote(exe: RemoteExecutor, candidates: list[str]) -> str | None:
+    """Finds the first candidate path that exists on the remote device,
+    in ONE round trip rather than one per candidate — each exe.run()
+    call is a full SSH/ADB invocation, so batching this into a single
+    shell loop keeps fingerprinting from getting slow as the candidate
+    lists grow."""
+    script = "for p in " + " ".join(f'"{p}"' for p in candidates) + '; do [ -e "$p" ] && echo "$p" && break; done'
+    return exe.run(script) or None
+
+
+def _search_module_props_remote(exe: RemoteExecutor, keyword: str) -> list[str]:
+    """
+    Searches every module.prop file under known Magisk/KernelSU/APatch
+    module directories for a case-insensitive keyword match anywhere in
+    the file (id, name, or description lines), returning the matching
+    module directories. Covers all three managers with one search,
+    since they share the same "one directory per module, containing
+    module.prop" layout.
+
+    This is how Sui and standalone Zygisk implementations (ZygiskNext,
+    ReZygisk, NeoZygisk) get detected — Sui specifically does NOT add
+    an su binary to PATH or install a manager app by design, so the
+    su-based checks elsewhere in this file will never find it; its
+    module.prop is the only reliable remote-shell-visible signal that
+    it's present at all.
+
+    Module ID/naming conventions vary across forks and repackagings —
+    this is a best-effort keyword search, not a hardcoded exact path,
+    the same caveat already noted for KernelSU/APatch su fallbacks
+    above.
+    """
+    roots_glob = " ".join(f"{root}/*/" for root in MODULE_SEARCH_ROOTS)
+    script = (
+        f'for d in {roots_glob}; do '
+        f'[ -f "${{d}}module.prop" ] && grep -qi "{keyword}" "${{d}}module.prop" 2>/dev/null && echo "$d"; '
+        f'done 2>/dev/null'
+    )
+    result = exe.run(script)
+    return [line.strip() for line in result.splitlines() if line.strip()] if result else []
+
+
 def probe_root_remote(exe: RemoteExecutor) -> dict:
-    checks = {
-        "magisk_prop": exe.run("getprop ro.magisk.version"),
-        "magisk_data_dir": exe.run("test -d /data/adb/magisk && echo yes"),
-        "kernelsu_prop": exe.run("getprop ro.kernelsu.version"),
-        "kernelsu_data_dir": exe.run("test -d /data/adb/ksu && echo yes"),
-        "apatch_data_dir": exe.run("test -d /data/adb/ap && echo yes"),
-        "su_on_path": exe.run("which su"),
-    }
+    # -- Magisk --
+    magisk_binary = _first_existing_remote(exe, MAGISK_BINARY_PATHS)
+    magisk_data_dir = bool(exe.run("test -d /data/adb/magisk && echo yes"))
+    magisk_prop = exe.run("getprop ro.magisk.version") or exe.run("getprop ro.magisk.versionCode")
+    magisk_legacy = bool(exe.run("test -e /sbin/.magisk && echo yes"))
+    magisk_app = bool(exe.run("test -d /data/data/com.topjohnwu.magisk && echo yes"))
+    magisk_detected = any([magisk_binary, magisk_data_dir, magisk_prop, magisk_legacy, magisk_app])
+
+    # -- KernelSU --
+    ksu_binary = _first_existing_remote(exe, KERNELSU_BINARY_PATHS)
+    ksu_data_dir = bool(exe.run("test -d /data/adb/ksu && echo yes"))
+    ksu_prop = exe.run("getprop ro.kernelsu.version")
+    # KernelSU patches the kernel directly, so /proc/version sometimes
+    # literally names it — a signal nothing else here gives you.
+    ksu_kernel_string = bool(exe.run("grep -qi kernelsu /proc/version 2>/dev/null && echo yes"))
+    ksu_app = bool(exe.run("test -d /data/data/me.weishu.kernelsu && echo yes"))
+    ksu_detected = any([ksu_binary, ksu_data_dir, ksu_prop, ksu_kernel_string, ksu_app])
+
+    # -- APatch --
+    apatch_binary = _first_existing_remote(exe, APATCH_BINARY_PATHS)
+    apatch_data_dir = bool(exe.run("test -d /data/adb/ap && echo yes"))
+    apatch_prop = exe.run("getprop ro.apatch.version")
+    apatch_app = bool(exe.run("test -d /data/data/me.bmax.apatch && echo yes"))
+    apatch_detected = any([apatch_binary, apatch_data_dir, apatch_prop, apatch_app])
+
     detected_manager = None
-    if checks["magisk_prop"] or checks["magisk_data_dir"]:
+    if magisk_detected:
         detected_manager = "magisk"
-    elif checks["kernelsu_prop"] or checks["kernelsu_data_dir"]:
+    elif ksu_detected:
         detected_manager = "kernelsu"
-    elif checks["apatch_data_dir"]:
+    elif apatch_detected:
         detected_manager = "apatch"
 
+    # -- Root access test: presence of a manager != currently having root --
+    su_path = exe.run("which su") or _first_existing_remote(exe, SU_SEARCH_PATHS)
     granted = False
-    if checks["su_on_path"]:
-        id_out = exe.run(f"{checks['su_on_path']} -c id")
-        granted = bool(id_out and "uid=0" in id_out)
+    invoke_method = None
 
-    return {"manager": detected_manager, "granted": granted, "raw": checks}
+    if su_path:
+        id_out = exe.run(f"{su_path} -c id")
+        if id_out and "uid=0" in id_out:
+            granted = True
+            invoke_method = f"{su_path} -c"
+
+    if not granted and detected_manager == "kernelsu" and ksu_binary:
+        # Best-effort secondary path — ksud's CLI surface has changed
+        # across versions, so this is a bonus attempt, not depended on;
+        # the generic su check above is the reliable path when it works.
+        id_out = exe.run(f"{ksu_binary} root id")
+        if id_out and "uid=0" in id_out:
+            granted = True
+            invoke_method = f"{ksu_binary} root"
+
+    if not granted and detected_manager == "apatch":
+        # Best-effort inference of APatch's su-equivalent location,
+        # matching its Magisk-compatible module layout — not
+        # independently verified against every APatch release.
+        apatch_su = "/data/adb/ap/bin/su"
+        if exe.run(f"test -e {apatch_su} && echo yes"):
+            id_out = exe.run(f"{apatch_su} -c id")
+            if id_out and "uid=0" in id_out:
+                granted = True
+                invoke_method = f"{apatch_su} -c"
+                su_path = apatch_su
+
+    # -- Zygisk (prerequisite for Sui) --
+    # Magisk 24+ bundles Zygisk internally — no separate module shows
+    # up for it, so its presence is inferred from Magisk itself being
+    # detected. Whether it's actually TOGGLED ON in Magisk's settings
+    # isn't reliably checkable from a plain remote shell (that state
+    # lives in Magisk's internal db, not a getprop or a file this probe
+    # can read) — this reports Zygisk CAPABILITY, not confirmed
+    # enablement, for the Magisk case specifically.
+    zygisk_modules = _search_module_props_remote(exe, "zygisk")
+    zygisk_capable = bool(zygisk_modules) or (magisk_detected and True)
+    zygisk_note = (
+        "capability inferred from Magisk itself (built-in since 24.0) — actual "
+        "on/off toggle state is not remotely checkable"
+        if magisk_detected and not zygisk_modules else
+        "standalone Zygisk implementation module found"
+        if zygisk_modules else
+        "no Zygisk implementation detected"
+    )
+
+    # -- Sui: does NOT expose an su binary or manager app by design,
+    # so it's only detectable via its module.prop, not via any of the
+    # su-based checks above.
+    sui_modules = _search_module_props_remote(exe, "sui")
+    sui_detected = bool(sui_modules)
+
+    # -- Baseline elevation, independent of su entirely --
+    # Captures the plain (no su) uid of the connecting session itself.
+    # This is what distinguishes "elevated but not root" (e.g. an ADB
+    # shell session, uid=2000, or a Shizuku/Sui-style elevated-but-
+    # non-root service) from a full root session (uid=0) or an
+    # ordinary unprivileged one — without requiring su to observe it.
+    baseline_id = exe.run("id") or ""
+    baseline_uid_match = re.search(r"uid=(\d+)\(([^)]*)\)", baseline_id)
+    baseline_uid = int(baseline_uid_match.group(1)) if baseline_uid_match else None
+    baseline_uid_name = baseline_uid_match.group(2) if baseline_uid_match else None
+
+    if baseline_uid == 0:
+        elevation_level = "root_session"  # the connection itself is already root, no su needed
+    elif baseline_uid == 2000:
+        elevation_level = "shell"  # standard adb shell baseline — elevated above a normal app, not root
+    elif baseline_uid is not None and baseline_uid < 10000:
+        elevation_level = "system_or_privileged_uid"  # below the app-sandbox uid range, worth noting even if not 0/2000
+    else:
+        elevation_level = "unprivileged_or_unknown"
+
+    # -- Combined summary: every relevant state and combination in one place --
+    if granted and sui_detected:
+        combined_state = "root+sui"
+    elif granted:
+        combined_state = "root"
+    elif sui_detected:
+        # Sui's module is present but su-based root wasn't confirmed —
+        # can happen since Sui deliberately hides the su binary this
+        # probe would otherwise use to confirm root.
+        combined_state = "sui_present_root_unconfirmed"
+    elif elevation_level in ("shell", "system_or_privileged_uid"):
+        combined_state = f"non_root_elevated:{elevation_level}"
+    else:
+        combined_state = "none"
+
+    return {
+        "manager": detected_manager,
+        "granted": granted,
+        "su_path": su_path,
+        "invoke_method": invoke_method,
+        "zygisk_capable": zygisk_capable,
+        "zygisk_modules": zygisk_modules,
+        "zygisk_note": zygisk_note,
+        "sui_detected": sui_detected,
+        "sui_modules": sui_modules,
+        "baseline_uid": baseline_uid,
+        "baseline_uid_name": baseline_uid_name,
+        "elevation_level": elevation_level,
+        "combined_state": combined_state,
+        "raw": {
+            "magisk": {
+                "binary": magisk_binary, "data_dir": magisk_data_dir,
+                "prop": magisk_prop, "legacy_sbin": magisk_legacy, "app_installed": magisk_app,
+            },
+            "kernelsu": {
+                "binary": ksu_binary, "data_dir": ksu_data_dir,
+                "prop": ksu_prop, "kernel_string": ksu_kernel_string, "app_installed": ksu_app,
+            },
+            "apatch": {
+                "binary": apatch_binary, "data_dir": apatch_data_dir,
+                "prop": apatch_prop, "app_installed": apatch_app,
+            },
+        },
+    }
 
 
 def probe_android(exe: RemoteExecutor, profile: DeviceProfile) -> None:
@@ -206,7 +417,7 @@ def probe_android(exe: RemoteExecutor, profile: DeviceProfile) -> None:
     profile.raw_probes["model"] = exe.run("getprop ro.product.model") or ""
     profile.raw_probes["brand"] = exe.run("getprop ro.product.brand") or ""
 
-    # Marketing name (e.g. "Galaxy S25 Ultra") is NOT a universal Android
+    # Marketing name (e.g. "Widget Pro 9000") is NOT a universal Android
     # property — only some OEM builds expose one, under inconsistent
     # keys. This tries the known candidates and falls back to empty if
     # none exist; the taxonomy step degrades gracefully to using the raw
@@ -368,7 +579,7 @@ def onboard_wired_devices() -> list[UsbDeviceProfile]:
 # it, named by you at the end of that unit's run.
 #
 # The category layers are best-effort. Android marketing names (e.g.
-# "Galaxy S25 Ultra") aren't a universal property — only some OEM builds
+# "Widget Pro 9000") aren't a universal property — only some OEM builds
 # expose one; when it's not available, the folder falls back to the raw
 # model number instead of a marketing name. Similarly, Linux DMI vendor/
 # product data isn't present on every board (Raspberry Pi and similar
@@ -384,7 +595,7 @@ def onboard_wired_devices() -> list[UsbDeviceProfile]:
 def _split_marketing_name(marketing_name: str, raw_model: str) -> tuple[str, str]:
     """
     Best-effort split of a marketing name into (product_line, specific_model).
-    "Galaxy S25 Ultra" -> ("Galaxy", "S25 Ultra")
+    "Widget Pro 9000" -> ("Widget", "Pro 9000")
     If no marketing name is available, falls back to a generic "Device"
     product-line bucket with the raw model number as the specific model —
     still fully automatic, just less descriptive than a marketing name
