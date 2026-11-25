@@ -32,7 +32,12 @@ def _expand_argv(argv, values):
     return expanded
 
 
-def build_onboarding_plan(profile, integrations: IntegrationStore):
+def build_onboarding_plan(profile, integrations: IntegrationStore,
+                          component_overrides: dict[str, bool] | None = None):
+    component_overrides = component_overrides or {}
+    unknown_overrides = set(component_overrides) - set(COMPONENTS)
+    if unknown_overrides:
+        raise ValueError("Unknown component override(s): " + ", ".join(sorted(unknown_overrides)))
     device_id = di._device_id(profile)
     values = {
         "hostname": profile.hostname,
@@ -70,8 +75,14 @@ def build_onboarding_plan(profile, integrations: IntegrationStore):
     steps = []
     for component in COMPONENTS:
         settings = integrations.get_component(component)
-        if not settings or settings.get("enabled") is not True:
+        enabled = component_overrides.get(
+            component, bool(settings and settings.get("enabled") is True)
+        )
+        if not enabled:
             steps.append({"component": component, "status": "disabled_or_unconfigured"})
+            continue
+        if not settings:
+            steps.append({"component": component, "status": "enabled_but_no_adapter"})
             continue
         config = settings.get("config") or {}
         argv = config.get("onboard_argv")
@@ -123,18 +134,28 @@ def build_onboarding_plan(profile, integrations: IntegrationStore):
 
 
 def validate_adapters(profile, integrations: IntegrationStore, timeout: float = 30.0,
-                      components: list[str] | None = None):
+                      components: list[str] | None = None,
+                      component_overrides: dict[str, bool] | None = None):
     """Run only configured preflight argv arrays; they must be read-only probes."""
-    device_id, values, _ = build_onboarding_plan(profile, integrations)
+    component_overrides = component_overrides or {}
+    device_id, values, _ = build_onboarding_plan(
+        profile, integrations, component_overrides=component_overrides
+    )
     selected = set(components) if components is not None else set(COMPONENTS)
     results = []
     for component in COMPONENTS:
         if component not in selected:
             continue
         settings = integrations.get_component(component)
-        if not settings or settings.get("enabled") is not True:
+        enabled = component_overrides.get(
+            component, bool(settings and settings.get("enabled") is True)
+        )
+        if not enabled:
             results.append({"component": component,
                             "status": "not_configured" if components is not None else "disabled_or_unconfigured"})
+            continue
+        if not settings:
+            results.append({"component": component, "status": "enabled_but_no_adapter"})
             continue
         config = settings.get("config") or {}
         raw_preflight = config.get("preflight_argv")
@@ -190,7 +211,8 @@ def validate_adapters(profile, integrations: IntegrationStore, timeout: float = 
 
 
 def onboard_node(target: str, connection_type: str, apply: bool = False,
-                 timeout: float = 120.0, store=None, integrations=None):
+                 timeout: float = 120.0, store=None, integrations=None,
+                 component_overrides: dict[str, bool] | None = None):
     """Fingerprint and optionally apply all configured adapters in order."""
     store = store or di.DeviceLogStore()
     integrations = integrations or IntegrationStore(root=store.root)
@@ -198,7 +220,10 @@ def onboard_node(target: str, connection_type: str, apply: bool = False,
     if profile.os_family == "unknown":
         raise RuntimeError(f"Could not identify {target!r} over {connection_type}; no actions were run")
 
-    device_id, values, plan = build_onboarding_plan(profile, integrations)
+    component_overrides = component_overrides or {}
+    device_id, values, plan = build_onboarding_plan(
+        profile, integrations, component_overrides=component_overrides
+    )
     if not apply:
         return {"applied": False, "device_id": device_id, "profile": di._to_serializable(profile), "steps": plan}
 
@@ -207,7 +232,10 @@ def onboard_node(target: str, connection_type: str, apply: bool = False,
         summary = ", ".join(f"{item['component']}={item['status']}" for item in blocked)
         raise RuntimeError(f"Adapter preflight/configuration requirements not met: {summary}")
 
-    preflight = validate_adapters(profile, integrations, timeout=min(timeout, 30.0))
+    preflight = validate_adapters(
+        profile, integrations, timeout=min(timeout, 30.0),
+        component_overrides=component_overrides,
+    )
     if not preflight["passed"]:
         summary = ", ".join(f"{item['component']}={item['status']}" for item in preflight["steps"]
                              if item["status"] not in ("passed", "disabled_or_unconfigured"))

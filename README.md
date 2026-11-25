@@ -25,6 +25,7 @@ here needs compiling, on Linux or Termux.
 
 ```sh
 farmctl configure                        # backend, remote, project name — once
+farmctl integrations                     # detect tools and save active defaults
 farmctl scan node-1.local --type ssh
 farmctl scan emulator-5554 --type adb
 farmctl backup
@@ -45,6 +46,22 @@ observations locally; it does not install or configure the services by
 itself. Records are stored beneath the same
 `persist_logs/integrations/` tree as device snapshots and are included in
 the existing backup/restore flow.
+
+Run `farmctl integrations` to open the keyboard-driven tool selector. It
+checks for known command-line clients/modules on the farmctl host, dims
+unavailable entries, and lets you move with the arrow keys and toggle
+available tools with Space. Press Enter to save persistent active/inactive
+defaults; press `q` or Escape to cancel. An unavailable tool is saved as
+inactive and therefore skipped instead of treated as an expected adapter.
+Detection means only that a local client/module is installed—it does not
+prove that a remote service is reachable or authenticated. API integrations
+may be detected through a generic client such as `curl`.
+
+`farmctl integrate TARGET --type ssh|adb` uses the saved active set by
+default. `--enable-component NAME` and `--skip-component NAME` are
+repeatable, temporary overrides for one run and do not modify the saved
+selection. The target and connection type remain necessary to identify the
+node; the saved list supplies the normal tool selection.
 
 ### Architecture
 

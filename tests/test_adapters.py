@@ -1,4 +1,5 @@
 import json
+import curses
 import sys
 import tempfile
 import unittest
@@ -11,6 +12,10 @@ from farmctl import device_inventory as di
 from farmctl.integration_inventory import COMPONENTS
 from farmctl.onboarding import PLACEHOLDERS, _expand_argv, validate_adapters, onboard_node
 from farmctl.purge import purge_node
+from farmctl.integration_menu import (
+    COMMAND_PROBES, ToolPresence, detect_tools, saved_selection, save_selection,
+    toggle_selection, _interactive_loop,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_DIR = ROOT / "examples" / "integrations"
@@ -87,6 +92,88 @@ class AdapterExampleTests(unittest.TestCase):
                     self.assertIn("preflight_argv", config)
                     self.assertTrue(config["onboard_argv"])
 
+    def test_every_component_has_a_local_tool_probe(self):
+        self.assertEqual(set(COMMAND_PROBES), set(COMPONENTS))
+
+    def test_detection_uses_local_command_presence_and_blocks_unavailable_toggle(self):
+        installed = {"nats", "kubectl"}
+        presence = detect_tools(
+            command_finder=lambda name: f"/usr/bin/{name}" if name in installed else None,
+            module_finder=lambda _name: None,
+        )
+        self.assertTrue(presence["nats-jetstream"].available)
+        self.assertTrue(presence["kubernetes"].available)
+        self.assertFalse(presence["ray"].available)
+        selected = toggle_selection(set(), "nats-jetstream", presence)
+        selected = toggle_selection(selected, "ray", presence)
+        self.assertEqual(selected, {"nats-jetstream"})
+
+    def test_menu_saves_selection_and_preserves_component_adapter_config(self):
+        from farmctl.integration_inventory import IntegrationStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = IntegrationStore(root=tmp)
+            existing = {"preflight_argv": ["nats", "server", "check"],
+                        "onboard_argv": ["nats", "kv", "put", "FARM_NODES", "{device_id}", "{}"]}
+            store.set_component("nats-jetstream", enabled=False, config=existing)
+            presence = {component: ToolPresence(component == "nats-jetstream",
+                        ("nats",) if component == "nats-jetstream" else (), ())
+                        for component in COMPONENTS}
+            selected = saved_selection(store, presence)
+            self.assertNotIn("nats-jetstream", selected)
+            save_selection(store, {"nats-jetstream"}, presence)
+            record = store.get_component("nats-jetstream")
+            self.assertTrue(record["enabled"])
+            self.assertEqual(record["config"], existing)
+            self.assertFalse(store.get_component("ray")["enabled"])
+
+    def test_arrow_space_enter_menu_keys_and_dim_unavailable_rows(self):
+        class FakeScreen:
+            def __init__(self):
+                self.keys = [ord(" "), curses.KEY_DOWN, ord(" "), 10]
+                self.lines = []
+
+            def getmaxyx(self):
+                return 20, 120
+
+            def erase(self):
+                pass
+
+            def addnstr(self, row, col, text, length, attr=0):
+                self.lines.append((row, text, attr))
+
+            def refresh(self):
+                pass
+
+            def getch(self):
+                return self.keys.pop(0)
+
+        screen = FakeScreen()
+        presence = {component: ToolPresence(component == "slurm",
+                    ("scontrol",) if component == "slurm" else (), ())
+                    for component in COMPONENTS}
+        adapter_ready = {component: False for component in COMPONENTS}
+        with patch("farmctl.integration_menu.curses.curs_set"):
+            selected, save = _interactive_loop(screen, set(), presence, adapter_ready)
+        self.assertTrue(save)
+        self.assertEqual(selected, {"slurm"})
+        missing_line, missing_attr = next(
+            (text, attr) for _, text, attr in screen.lines if "nats-jetstream" in text
+        )
+        self.assertIn("not found", missing_line)
+        self.assertIn("[-]", missing_line)
+        self.assertTrue(missing_attr & curses.A_DIM)
+
+        for cancel_key in (ord("q"), 27):
+            screen = FakeScreen()
+            screen.keys = [ord(" "), cancel_key]
+            with patch("farmctl.integration_menu.curses.curs_set"):
+                cancelled_selection, save = _interactive_loop(
+                    screen, set(), presence, adapter_ready
+                )
+            self.assertFalse(save)
+            self.assertEqual(cancelled_selection, {"slurm"})
+
 
 class MockNodeIntegrationTests(unittest.TestCase):
     def setUp(self):
@@ -133,6 +220,30 @@ class MockNodeIntegrationTests(unittest.TestCase):
             result = onboard_node("mock-node", "ssh", apply=False,
                                   store=MockArchive(tempfile.mkdtemp()), integrations=integrations)
         self.assertFalse(result["applied"])
+        run.assert_not_called()
+
+    def test_single_run_overrides_do_not_change_saved_integration_settings(self):
+        settings = {
+            "kubernetes": {"enabled": True, "config": {
+                "preflight_argv": [sys.executable, "-c", "exit(0)"],
+                "onboard_argv": [sys.executable, "-c", "exit(0)"]}},
+            "slurm": {"enabled": False, "config": {
+                "preflight_argv": [sys.executable, "-c", "exit(0)"],
+                "onboard_argv": [sys.executable, "-c", "exit(0)"]}},
+        }
+        integrations = MemoryIntegrations(settings)
+        with patch("farmctl.onboarding.di.fingerprint_device", return_value=self.profile), \
+             patch("farmctl.onboarding.subprocess.run") as run:
+            result = onboard_node(
+                "mock-node", "ssh", apply=False,
+                store=MockArchive(tempfile.mkdtemp()), integrations=integrations,
+                component_overrides={"kubernetes": False, "slurm": True},
+            )
+        steps = {step["component"]: step["status"] for step in result["steps"]}
+        self.assertEqual(steps["kubernetes"], "disabled_or_unconfigured")
+        self.assertEqual(steps["slurm"], "ready")
+        self.assertTrue(settings["kubernetes"]["enabled"])
+        self.assertFalse(settings["slurm"]["enabled"])
         run.assert_not_called()
 
 

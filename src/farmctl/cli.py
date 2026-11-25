@@ -18,6 +18,7 @@ Typical flow:
 import sys
 import argparse
 import json
+import curses
 
 from pathlib import Path
 
@@ -26,6 +27,7 @@ from . import device_inventory as di
 from .integration_inventory import IntegrationStore, COMPONENTS
 from .onboarding import onboard_node, validate_adapters
 from .purge import purge_node
+from .integration_menu import run_integrations_menu
 from cloud_restore import (
     print_sync_result, restore_or_raise, backup_project, restore_project,
     backup_project_compressed, restore_project_compressed, restore_project_auto,
@@ -286,8 +288,16 @@ def cmd_integration_events(args) -> int:
 
 
 def cmd_integrate(args) -> int:
+    overrides = {component: True for component in args.enable_component}
+    for component in args.skip_component:
+        if component in overrides:
+            print(f"Component {component!r} cannot be both enabled and skipped for one run.",
+                  file=sys.stderr)
+            return 2
+        overrides[component] = False
     try:
-        result = onboard_node(args.target, args.type, apply=args.apply, timeout=args.timeout)
+        result = onboard_node(args.target, args.type, apply=args.apply,
+                              timeout=args.timeout, component_overrides=overrides)
     except (RuntimeError, ValueError) as exc:
         print(f"Onboarding stopped: {exc}", file=sys.stderr)
         return 1
@@ -326,6 +336,24 @@ def cmd_validate_adapters(args) -> int:
         if step["status"] not in ("passed", "disabled_or_unconfigured"):
             failed = True
     return 1 if failed else 0
+
+
+def cmd_integrations(args) -> int:
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        print("The integrations selector requires an interactive terminal.", file=sys.stderr)
+        return 2
+    try:
+        result = run_integrations_menu()
+    except curses.error as exc:
+        print(f"Could not start the terminal selector: {exc}", file=sys.stderr)
+        return 2
+    if not result["saved"]:
+        print("Integration selection cancelled; no settings changed.")
+        return 0
+    active = len(result["selected"])
+    missing = sum(not tool.available for tool in result["presence"].values())
+    print(f"Integration defaults saved: {active} active; {missing} unavailable and disabled.")
+    return 0
 
 
 def cmd_purge(args) -> int:
@@ -393,6 +421,7 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("status", help="Show current config and local archive summary.").set_defaults(func=cmd_status)
     sub.add_parser("compressors", help="List compression algorithms and which are actually installed on this machine.").set_defaults(func=cmd_compressors)
+    sub.add_parser("integrations", help="Interactively detect and select available integration tools.").set_defaults(func=cmd_integrations)
 
     p_integrations = sub.add_parser("integration", help="Track platform switches, configuration snapshots, and events.")
     integration_sub = p_integrations.add_subparsers(dest="integration_command", required=True)
@@ -422,6 +451,10 @@ def main(argv: list[str] | None = None) -> int:
     p_integrate.add_argument("--type", choices=["ssh", "adb"], required=True)
     p_integrate.add_argument("--apply", action="store_true", help="Persist the snapshot and execute configured adapters (default is plan-only).")
     p_integrate.add_argument("--timeout", type=float, default=120.0, help="Per-adapter timeout in seconds (default: 120).")
+    p_integrate.add_argument("--enable-component", choices=COMPONENTS, action="append", default=[],
+                             help="Enable this component for this run only; repeatable.")
+    p_integrate.add_argument("--skip-component", choices=COMPONENTS, action="append", default=[],
+                             help="Skip this component for this run only; repeatable.")
     p_integrate.set_defaults(func=cmd_integrate)
 
     p_validate = sub.add_parser("validate-adapters", help="Run configured read-only connectivity/credential probes for enabled adapters.")

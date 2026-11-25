@@ -24,6 +24,30 @@ The installed CLI entry point is declared by the Python package. The project als
 
 The component catalog includes Slurm, NATS JetStream, Ray, Cilium, Ansible, Nomad, NetBox, Kubernetes, Falco, KEDA, Argo CD, Tetragon, Tailscale, Temporal, Loki, Tempo, DeepSpeed, IPEX-LLM, Terraform, Kafka, ZeroMQ, RabbitMQ, Redpanda, Redis Streams, Rubix, Apollo, Falcon, VictoriaMetrics, GraphQL, SQL, DuckDB, NubeIO, MQTT, Modbus, NGINX, ngrok, BACnet, Grafana, BOINC, regex, rsync, rclone, Prometheus, Hetzner, Equinix Metal, OVH, IXP, ARIN, RIPE, TrueNAS, Cloudflare, WireGuard, and Son of Grid Engine. The canonical spellings accepted by the CLI are shown by `farmctl integration set --help`.
 
+### `farmctl integrations`
+
+Open the interactive integration selector. It requires a real interactive
+terminal and takes no flags or arguments.
+
+```sh
+farmctl integrations
+```
+
+Use Up/Down or `j`/`k` to move, Space to toggle an available component,
+Enter to save, and `q` or Escape to cancel. `[x]` means active, `[ ]` means
+detected but inactive, and `[-]` means the local probe did not find a client;
+unavailable entries are dimmed and cannot be enabled in the selector. On
+save, unavailable components are persisted as disabled, while existing
+component adapter configs, switches, and event logs are retained. The
+saved `enabled` flags drive normal `farmctl integrate` runs.
+
+Detection checks local executable names (and a small number of Python
+modules), not remote service health, credentials, or cluster configuration.
+Some API-oriented components can be detected by a generic client such as
+`curl`, so a detected client does not prove that the corresponding service
+exists or is reachable. Configure and validate each tool's `preflight_argv`
+before applying adapters.
+
 ### `farmctl integration set <component>`
 
 Set an integration's enabled state and/or JSON settings.
@@ -87,12 +111,18 @@ Fingerprint a node and build an ordered plan through the integration catalog. Th
 
 ```text
 farmctl integrate TARGET --type {ssh,adb} [--apply] [--timeout SECONDS]
+  [--enable-component COMPONENT ...] [--skip-component COMPONENT ...]
 ```
 
 - `TARGET`: SSH host or ADB serial.
 - `--type`: required connection mode.
 - `--apply`: persist the inventory snapshot and execute each configured adapter sequentially. Without it, no onboarding action or snapshot write occurs.
 - `--timeout`: per-adapter timeout, default 120 seconds.
+- Repeat `--enable-component` to activate a configured adapter for this run,
+  even if its saved default is inactive. Repeat `--skip-component` to skip a
+  saved-active adapter for this run. A component cannot appear in both lists;
+  these overrides do not modify saved settings. If omitted, saved selector
+  choices are used.
 
 For apply, every enabled adapter must have both a valid `preflight_argv` and `onboard_argv`, all required executables must exist, and all preflights must pass before any onboarding action runs. This is not a transaction: if a later adapter fails, earlier actions may already have succeeded. The inventory snapshot and per-tool `node.onboarding` events are stored locally.
 
@@ -101,8 +131,9 @@ Supported placeholders include `{hostname}`, `{device_id}`, `{manufacturer}`, `{
 Example:
 
 ```sh
-farmctl integrate worker-02 --type ssh              # plan only
-farmctl integrate worker-02 --type ssh --apply      # explicit apply
+farmctl integrate worker-02 --type ssh              # saved active defaults; plan only
+farmctl integrate worker-02 --type ssh --apply      # explicit apply with saved defaults
+farmctl integrate worker-02 --type ssh --skip-component cilium  # one-run override
 ```
 
 ### `farmctl validate-adapters <target>`
