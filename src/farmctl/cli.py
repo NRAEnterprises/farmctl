@@ -25,6 +25,7 @@ from .config import load_config, save_config, build_backend_from_config
 from . import device_inventory as di
 from .integration_inventory import IntegrationStore, COMPONENTS
 from .onboarding import onboard_node, validate_adapters
+from .purge import purge_node
 from cloud_restore import (
     print_sync_result, restore_or_raise, backup_project, restore_project,
     backup_project_compressed, restore_project_compressed, restore_project_auto,
@@ -326,6 +327,29 @@ def cmd_validate_adapters(args) -> int:
             failed = True
     return 1 if failed else 0
 
+
+def cmd_purge(args) -> int:
+    try:
+        result = purge_node(args.target, args.type, apply=args.apply,
+                            confirm_device_id=args.confirm_device_id,
+                            timeout=args.timeout)
+    except (RuntimeError, ValueError) as exc:
+        print(f"Purge stopped: {exc}", file=sys.stderr)
+        return 1
+    print(f"Node: {result['profile'].get('hostname')}  ID: {result['device_id']}")
+    print("Mode: APPLY" if args.apply else "Mode: PLAN ONLY (no changes made)")
+    for step in result["steps"]:
+        print(f"  {step['component']}: {step['status']}")
+        if step.get("preflight_argv"):
+            print("    preflight: " + json.dumps(step["preflight_argv"]))
+        if step.get("teardown_argv"):
+            print("    teardown:  " + json.dumps(step["teardown_argv"]))
+    if args.apply:
+        print(f"Local snapshot removed: {result['local_snapshot_removed']}")
+    else:
+        print(f"Review the plan, then rerun with --apply --confirm-device-id {result['device_id']}")
+    return 0
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="farmctl", description="Device fleet scan, archive, backup, and restore.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -407,6 +431,14 @@ def main(argv: list[str] | None = None) -> int:
     p_validate.add_argument("--component", choices=COMPONENTS, action="append",
                             help="Validate only this configured integration; repeat for multiple components.")
     p_validate.set_defaults(func=cmd_validate_adapters)
+
+    p_purge = sub.add_parser("purge", help="Plan or execute configured teardowns for a node, then remove its local snapshot.")
+    p_purge.add_argument("target", help="SSH host or ADB serial to fingerprint")
+    p_purge.add_argument("--type", choices=["ssh", "adb"], required=True)
+    p_purge.add_argument("--apply", action="store_true", help="Run explicit teardown adapters and remove this node's local snapshot (default is plan-only).")
+    p_purge.add_argument("--confirm-device-id", help="Required with --apply; exact ID printed by the reviewed plan.")
+    p_purge.add_argument("--timeout", type=float, default=120.0, help="Per-teardown timeout in seconds (default: 120).")
+    p_purge.set_defaults(func=cmd_purge)
 
     args = parser.parse_args(argv)
     return args.func(args)

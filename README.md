@@ -65,6 +65,10 @@ flowchart LR
     EVT --> STORE
     STORE --> BACKUP[Existing farmctl backup and restore]
     INV --> BACKUP
+    CLI -->|purge target| REV[Explicit teardown plan]
+    REV -->|all preflights pass| TEAR[Configured reverse adapters]
+    TEAR -->|all succeed| DEL[Remove only that node snapshot]
+    TEAR --> AUDIT[(Purge audit and retained event history)]
 ```
 
 The adapters execute on the machine running `farmctl`, in catalog order,
@@ -305,6 +309,32 @@ Later, after a rebuild:
 farmctl restore
 farmctl rebuild
 ```
+
+### Disaster recovery and node teardown
+
+`farmctl purge <target> --type ssh|adb` is plan-only by default. It finds
+tools with a recorded onboarding attempt for that device ID and displays the
+configured preflight and teardown commands. To apply, configure each such
+tool with an explicit `preflight_argv` and `teardown_argv`, review the plan,
+then repeat with `--apply --confirm-device-id <exact-id>` copied from the
+plan. Every purge preflight runs before any teardown; a missing adapter or
+failed preflight blocks all teardown actions. Farmctl does not invent resource
+deletion commands for heterogeneous tools. If a teardown fails partway,
+earlier external teardowns may have succeeded; farmctl retains the local
+snapshot and writes the outcome to `persist_logs/integrations/purge_audit.jsonl`
+for reconciliation. On complete success, only the selected node snapshot
+directory is removed. Integration settings and event history are retained.
+Back up first, and ensure each teardown reverses only resources created by
+its matching onboarding adapter.
+
+See the [comprehensive CLI reference](docs/cli-reference.md) for every
+integration subcommand, flag, adapter field, and purge safety detail.
+
+The `Adapter tests` GitHub Actions workflow runs the unit and mocked
+integration suite on Python 3.10 and 3.12. It validates every shipped argv
+example, expands placeholders against mock inventory, checks that dry-run
+and preflight failures do not invoke onboarding actions, and exercises purge
+confirmation, preflight, teardown, audit, and node-scoped deletion behavior.
 
 ## What each command does
 
