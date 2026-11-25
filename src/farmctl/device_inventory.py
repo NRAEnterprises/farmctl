@@ -110,6 +110,12 @@ class DeviceProfile:
     hostname: str
     connection_type: str
     os_family: str = ""
+    manufacturer: str = ""
+    model: str = ""
+    device_type: str = ""
+    architecture: str = ""
+    cpu_threads: str = ""
+    memory_mb: str = ""
     distro: str = ""
     distro_version: str = ""
     kernel_release: str = ""
@@ -131,6 +137,9 @@ def detect_os_family(exe: RemoteExecutor) -> str:
 def probe_linux(exe: RemoteExecutor, profile: DeviceProfile) -> None:
     profile.kernel_release = exe.run("uname -r") or ""
     profile.kernel_arch = exe.run("uname -m") or ""
+    profile.architecture = profile.kernel_arch
+    profile.cpu_threads = exe.run("getconf _NPROCESSORS_ONLN 2>/dev/null") or ""
+    profile.memory_mb = exe.run("awk '/MemTotal/ {printf \"%d\", $2/1024}' /proc/meminfo 2>/dev/null") or ""
 
     os_release = exe.run("cat /etc/os-release 2>/dev/null")
     if os_release:
@@ -161,6 +170,7 @@ def probe_linux(exe: RemoteExecutor, profile: DeviceProfile) -> None:
     profile.raw_probes["dmi_vendor"] = exe.run(
         "cat /sys/class/dmi/id/sys_vendor 2>/dev/null"
     ) or ""
+    profile.manufacturer = profile.raw_probes["dmi_vendor"]
     profile.raw_probes["dmi_product"] = exe.run(
         "cat /sys/class/dmi/id/product_name 2>/dev/null"
     ) or ""
@@ -168,6 +178,14 @@ def probe_linux(exe: RemoteExecutor, profile: DeviceProfile) -> None:
         profile.raw_probes["dmi_product"] = exe.run(
             "cat /proc/device-tree/model 2>/dev/null"
         ) or ""
+    profile.model = profile.raw_probes["dmi_product"].replace("\x00", "").strip()
+    chassis_code = exe.run("cat /sys/class/dmi/id/chassis_type 2>/dev/null") or ""
+    profile.raw_probes["dmi_chassis_type"] = chassis_code
+    profile.device_type = {
+        "3": "desktop", "4": "desktop", "6": "desktop", "7": "desktop",
+        "8": "portable", "9": "portable", "10": "portable", "14": "tablet",
+        "17": "server", "23": "server", "30": "tablet",
+    }.get(chassis_code.strip(), "embedded" if profile.raw_probes["dmi_product"] and not profile.raw_probes["dmi_vendor"] else "linux-node")
 
 
 # =======================================================================
@@ -411,11 +429,17 @@ def probe_android(exe: RemoteExecutor, profile: DeviceProfile) -> None:
     profile.android_api_level = exe.run("getprop ro.build.version.sdk") or ""
     profile.kernel_release = exe.run("uname -r") or ""
     profile.kernel_arch = exe.run("uname -m") or ""
+    profile.architecture = profile.kernel_arch
+    profile.cpu_threads = exe.run("getconf _NPROCESSORS_ONLN 2>/dev/null") or ""
+    profile.memory_mb = exe.run("awk '/MemTotal/ {printf \"%d\", $2/1024}' /proc/meminfo 2>/dev/null") or ""
 
     profile.raw_probes["fingerprint"] = exe.run("getprop ro.build.fingerprint") or ""
     profile.raw_probes["manufacturer"] = exe.run("getprop ro.product.manufacturer") or ""
     profile.raw_probes["model"] = exe.run("getprop ro.product.model") or ""
     profile.raw_probes["brand"] = exe.run("getprop ro.product.brand") or ""
+    profile.manufacturer = profile.raw_probes["manufacturer"]
+    profile.model = profile.raw_probes["model"]
+    profile.device_type = exe.run("getprop ro.build.characteristics") or exe.run("getprop ro.product.device") or "android-device"
 
     # Marketing name (e.g. "Widget Pro 9000") is NOT a universal Android
     # property — only some OEM builds expose one, under inconsistent

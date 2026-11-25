@@ -1,0 +1,7 @@
+{
+  "preflight_argv": [
+    "tailscale",
+    "status",
+    "--json"
+  ]
+}

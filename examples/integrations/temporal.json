@@ -1,0 +1,18 @@
+{
+  "preflight_argv": [
+    "temporal",
+    "operator",
+    "cluster",
+    "health",
+    "--address",
+    "TEMPORAL_FRONTEND:7233"
+  ],
+  "onboard_argv": [
+    "ssh",
+    "{hostname}",
+    "sudo",
+    "systemctl",
+    "start",
+    "temporal-worker"
+  ]
+}

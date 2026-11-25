@@ -1,0 +1,9 @@
+{
+  "preflight_argv": [
+    "kubectl",
+    "get",
+    "nodes",
+    "-o",
+    "name"
+  ]
+}

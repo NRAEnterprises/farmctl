@@ -1,0 +1,11 @@
+{
+  "preflight_argv": ["ray", "status", "--address", "RAY_HEAD_ADDRESS:6379"],
+  "onboard_argv": [
+    "ssh",
+    "{hostname}",
+    "ray",
+    "start",
+    "--address=RAY_HEAD_ADDRESS:6379",
+    "--num-cpus={cpu_threads}"
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "preflight_argv": [
+    "curl",
+    "-fsS",
+    "http://PROMETHEUS_HOST:9090/-/ready"
+  ]
+}

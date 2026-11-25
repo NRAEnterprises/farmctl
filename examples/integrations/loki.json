@@ -1,0 +1,18 @@
+{
+  "preflight_argv": [
+    "curl",
+    "-fsS",
+    "http://LOKI_HOST:3100/ready"
+  ],
+  "onboard_argv": [
+    "curl",
+    "-fsS",
+    "-X",
+    "POST",
+    "http://LOKI_HOST:3100/loki/api/v1/push",
+    "-H",
+    "Content-Type: application/json",
+    "--data-binary",
+    "{loki_push_json}"
+  ]
+}

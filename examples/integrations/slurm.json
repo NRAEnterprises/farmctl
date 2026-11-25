@@ -1,0 +1,11 @@
+{
+  "preflight_argv": ["scontrol", "ping"],
+  "onboard_argv": [
+    "scontrol",
+    "create",
+    "NodeName={hostname}",
+    "CPUs={cpu_threads}",
+    "RealMemory={memory_mb}",
+    "State=FUTURE"
+  ]
+}

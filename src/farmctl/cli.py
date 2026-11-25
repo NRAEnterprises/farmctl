@@ -17,11 +17,14 @@ Typical flow:
 
 import sys
 import argparse
+import json
 
 from pathlib import Path
 
 from .config import load_config, save_config, build_backend_from_config
 from . import device_inventory as di
+from .integration_inventory import IntegrationStore, COMPONENTS
+from .onboarding import onboard_node, validate_adapters
 from cloud_restore import (
     print_sync_result, restore_or_raise, backup_project, restore_project,
     backup_project_compressed, restore_project_compressed, restore_project_auto,
@@ -233,6 +236,96 @@ def cmd_status(args) -> int:
     print(f"Devices tracked:    {len(store.list_devices())}")
     return 0
 
+
+def cmd_integration_set(args) -> int:
+    store = IntegrationStore()
+    enabled = True if args.enable else False if args.disable else None
+    try:
+        path = store.set_component(args.component, enabled=enabled,
+                                   switches=args.switches_json, config=args.config_json)
+    except (ValueError, json.JSONDecodeError) as exc:
+        print(f"Invalid integration data: {exc}", file=sys.stderr)
+        return 2
+    print(f"Integration settings saved: {path}")
+    return 0
+
+
+def cmd_integration_show(args) -> int:
+    store = IntegrationStore()
+    try:
+        if args.component:
+            records = [store.get_component(args.component)]
+        else:
+            records = store.list_components()
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(json.dumps([record for record in records if record is not None], indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_integration_log(args) -> int:
+    try:
+        path = IntegrationStore().log_event(args.component, args.event, args.data_json)
+    except (ValueError, json.JSONDecodeError) as exc:
+        print(f"Invalid event data: {exc}", file=sys.stderr)
+        return 2
+    print(f"Event appended: {path}")
+    return 0
+
+
+def cmd_integration_events(args) -> int:
+    try:
+        events = IntegrationStore().read_events(args.component, args.limit)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(json.dumps(events, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_integrate(args) -> int:
+    try:
+        result = onboard_node(args.target, args.type, apply=args.apply, timeout=args.timeout)
+    except (RuntimeError, ValueError) as exc:
+        print(f"Onboarding stopped: {exc}", file=sys.stderr)
+        return 1
+    print(f"Node: {result['profile'].get('hostname')}  ID: {result['device_id']}")
+    if result.get("snapshot"):
+        print(f"Inventory snapshot: {result['snapshot']}")
+    print("Mode: APPLY" if args.apply else "Mode: PLAN ONLY (no changes made; pass --apply to execute)")
+    failed = False
+    for step in result["steps"]:
+        status = step["status"]
+        detail = f" ({step['detail']})" if step.get("detail") else ""
+        executable = f" via {step['executable']}" if step.get("executable") else ""
+        print(f"  {step['component']}: {status}{executable}{detail}")
+        failed = failed or status in ("failed", "timed_out", "executable_not_found",
+                                      "preflight_missing", "preflight_executable_not_found",
+                                      "enabled_but_no_adapter", "invalid_adapter",
+                                      "missing_profile_fields")
+    if not args.apply:
+        ready_count = sum(1 for step in result["steps"] if step["status"] == "ready")
+        print(f"Ready adapters: {ready_count}; configure enabled tools with integration set <component> --enable --config-json '{{\"onboard_argv\":[...]}}'")
+    return 1 if failed else 0
+
+
+def cmd_validate_adapters(args) -> int:
+    profile = di.fingerprint_device(args.target, args.type)
+    if profile.os_family == "unknown":
+        print(f"Could not identify {args.target!r}; no preflight probes were run.", file=sys.stderr)
+        return 1
+    result = validate_adapters(profile, IntegrationStore(), timeout=args.timeout,
+                               components=args.component)
+    print(f"Read-only adapter preflight for {profile.hostname} ({result['device_id']})")
+    failed = False
+    for step in result["steps"]:
+        details = f" ({step['detail']})" if step.get("detail") else ""
+        print(f"  {step['component']}: {step['status']}{details}")
+        if step["status"] not in ("passed", "disabled_or_unconfigured"):
+            failed = True
+    return 1 if failed else 0
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="farmctl", description="Device fleet scan, archive, backup, and restore.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -276,6 +369,44 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("status", help="Show current config and local archive summary.").set_defaults(func=cmd_status)
     sub.add_parser("compressors", help="List compression algorithms and which are actually installed on this machine.").set_defaults(func=cmd_compressors)
+
+    p_integrations = sub.add_parser("integration", help="Track platform switches, configuration snapshots, and events.")
+    integration_sub = p_integrations.add_subparsers(dest="integration_command", required=True)
+    p_set = integration_sub.add_parser("set", help="Set desired integration state and optional switches/config JSON.")
+    p_set.add_argument("component", choices=COMPONENTS)
+    state = p_set.add_mutually_exclusive_group()
+    state.add_argument("--enable", action="store_true")
+    state.add_argument("--disable", action="store_true")
+    p_set.add_argument("--switches-json", help='JSON object, e.g. \'{"accounting":true,"gpus":true}\'')
+    p_set.add_argument("--config-json", help="JSON object containing non-secret config metadata.")
+    p_set.set_defaults(func=cmd_integration_set)
+    p_show = integration_sub.add_parser("show", help="Show all integration settings or one component.")
+    p_show.add_argument("component", nargs="?", choices=COMPONENTS)
+    p_show.set_defaults(func=cmd_integration_show)
+    p_log = integration_sub.add_parser("log", help="Append an event record for a component.")
+    p_log.add_argument("component", choices=COMPONENTS)
+    p_log.add_argument("event", help="Event name, such as job.submitted or node.drained.")
+    p_log.add_argument("--data-json", help="JSON object with event details.")
+    p_log.set_defaults(func=cmd_integration_log)
+    p_events = integration_sub.add_parser("events", help="Show recent component events.")
+    p_events.add_argument("component", choices=COMPONENTS)
+    p_events.add_argument("--limit", type=int, default=50)
+    p_events.set_defaults(func=cmd_integration_events)
+
+    p_integrate = sub.add_parser("integrate", help="Fingerprint a node and orchestrate configured tool adapters in order.")
+    p_integrate.add_argument("target", help="SSH host or ADB serial")
+    p_integrate.add_argument("--type", choices=["ssh", "adb"], required=True)
+    p_integrate.add_argument("--apply", action="store_true", help="Persist the snapshot and execute configured adapters (default is plan-only).")
+    p_integrate.add_argument("--timeout", type=float, default=120.0, help="Per-adapter timeout in seconds (default: 120).")
+    p_integrate.set_defaults(func=cmd_integrate)
+
+    p_validate = sub.add_parser("validate-adapters", help="Run configured read-only connectivity/credential probes for enabled adapters.")
+    p_validate.add_argument("target", help="SSH host or ADB serial to fingerprint")
+    p_validate.add_argument("--type", choices=["ssh", "adb"], required=True)
+    p_validate.add_argument("--timeout", type=float, default=30.0)
+    p_validate.add_argument("--component", choices=COMPONENTS, action="append",
+                            help="Validate only this configured integration; repeat for multiple components.")
+    p_validate.set_defaults(func=cmd_validate_adapters)
 
     args = parser.parse_args(argv)
     return args.func(args)

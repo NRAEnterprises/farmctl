@@ -1,0 +1,11 @@
+{
+  "preflight_argv": ["cilium", "status", "--wait"],
+  "onboard_argv": [
+    "kubectl",
+    "label",
+    "node",
+    "{hostname}",
+    "farmctl.io/cilium-managed=true",
+    "--overwrite"
+  ]
+}

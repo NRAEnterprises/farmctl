@@ -1,0 +1,20 @@
+{
+  "preflight_argv": [
+    "kubectl",
+    "get",
+    "daemonset",
+    "tetragon",
+    "-n",
+    "kube-system",
+    "-o",
+    "name"
+  ],
+  "onboard_argv": [
+    "kubectl",
+    "label",
+    "node",
+    "{hostname}",
+    "farmctl.io/tetragon-managed=true",
+    "--overwrite"
+  ]
+}

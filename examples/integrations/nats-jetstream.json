@@ -1,0 +1,11 @@
+{
+  "preflight_argv": ["nats", "kv", "status", "FARM_NODES"],
+  "onboard_argv": [
+    "nats",
+    "kv",
+    "put",
+    "FARM_NODES",
+    "node-{device_id}",
+    "{inventory_json}"
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "preflight_argv": [
+    "argocd",
+    "app",
+    "get",
+    "farmctl-node-bootstrap"
+  ],
+  "onboard_argv": [
+    "argocd",
+    "app",
+    "sync",
+    "farmctl-node-bootstrap",
+    "--apply-out-of-sync-only",
+    "--info",
+    "farmctl/node={hostname}"
+  ]
+}
